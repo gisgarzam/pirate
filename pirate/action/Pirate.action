@@ -1,0 +1,20 @@
+#goal definition
+#find the name of the goal
+uint8 name
+uint8 CLAMP_STRAIGHT= 0
+uint8 CLAMP_SIDEWAYS = 1
+uint8 T_JOINT = 2
+uint8 MITRE_BEND = 3
+uint8 DRIVE = 4
+uint8 HOME =5
+#the extra parameter for clamping actions/ possibly for mitre-bend, t-joint as well given in mm
+uint8 pipeDiameter
+#the extra parameter for drive action... will not be considered otherwise negative distance is backwards, positive distance is forward, given in mm
+int16 distance
+---
+#result definition
+sensor_msgs/JointState joint_state
+---
+#feedback
+sensor_msgs/JointState joint_state
+

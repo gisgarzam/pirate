@@ -1,0 +1,36 @@
+#include <ros/ros.h>
+#include <std_msgs/Float32.h>
+#include <actionlib/server/simple_action_server.h>
+#include <sensor_msgs/JointState.h>
+#include <mapping_midi/PirateAction.h>
+#include <pirate_msgs/PirateControl_Array.h>
+#include <pirate_msgs/PirateLimits_Array.h>
+#include <pirate_msgs/PirateSetpoint_Array.h>
+#include <pirate_msgs/PirateRPY.h>
+#include <iostream>		//Input-Output Streams
+#include <math.h>		//Math library for M_PI
+#include <boost/thread.hpp>
+
+#ifndef MOTION_PRIMITIVES_H_
+#define MOTION_PRIMITIVES_H_
+
+class Motion_Primitives {
+    
+    public:
+    // constructor
+    Motion_Primitives();
+    
+    // destructor
+    ~Motion_Primitives();
+    
+    // Motion primitives methods
+    void moveBFModule(uint8_t moduleID, int setpoint, pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    void changeControlBFModule(uint8_t moduleID, uint8_t control_mode, pirate_msgs::PirateControl_Array &control_msg);
+    void driveVel(int velocity, pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool clampRear110(pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool rotate(int setpoint_radians, pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool clampRear90(pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool unclampPartialRear110(pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool unclampPartialRear90(pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+    bool unclampFullRear(pirate_msgs::PirateSetpoint_Array &setpoint_msg);
+}

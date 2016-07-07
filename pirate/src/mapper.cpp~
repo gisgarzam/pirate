@@ -1,0 +1,654 @@
+#include <ros/ros.h>
+#include <std_msgs/String.h>
+#include <sensor_msgs/JointState.h>
+#include <pirate_msgs/PirateControl.h>
+#include <pirate_msgs/PirateControl_Array.h>
+#include <pirate_msgs/PirateLimits_Array.h>
+#include <pirate_msgs/PirateSetpoint_Array.h>
+#include <ram_input_msgs/Midi.h>
+#include <ram_input_msgs/MidiOutput.h>
+#include <geometry_msgs/Twist.h>
+#include <actionlib/client/simple_action_client.h>
+#include <pirate/Pirate_PABAction.h>
+#include <iostream>
+
+using namespace pirate;
+typedef actionlib::SimpleActionClient<PirateAction> Client;
+
+class Mapper
+{
+ public:
+    Mapper(ros::NodeHandle* nh);
+    void publisher(void);
+
+		void doneCb(const actionlib::SimpleClientGoalState& state,
+									const PirateResultConstPtr& result)
+			{
+			/* ROS_INFO("Finished in state [%s]", state.toString().c_str());
+				std::cout << "angles = ";
+				for (int i = 0; i < 8; i++) {
+			std:: cout << std::fixed << std::setw(7) << std::setprecision(2) << result->angles[i];// << ", ";
+			}
+				std::cout << std::endl;
+				std::cout << "efforts = ";
+				for (int i = 0; i < 8; i++) {
+			std::cout << std::fixed << std::setw(7) << std::setprecision(2) << result->efforts[i];// << ", ";
+			}
+			std::cout << std::endl; */		
+			}
+	
+ private: 
+	ros::NodeHandle& nh_;        
+	Client ac;
+	void callback(const ram_input_msgs::Midi::ConstPtr& midi);
+    
+ 	ros::Publisher pub_control;
+  	ros::Subscriber sub_midi;
+    ros::Publisher pub_midi;
+    ros::Publisher pub_limit;
+    ros::Publisher pub_setpoint;
+    
+	/**
+	* Variable declarations.
+	*/
+	// In these arrays we will store the current values of all the setpoints and control, so we can toggle from one to the other.
+	bool noLimitsAll = false;
+	int16_t angleSetpoint[9] = {0};
+	int16_t speedSetpoint[9] = {0};
+	int16_t torqueSetpoint[9] = {0};
+	uint8_t control0Mode[9] = {0};  // Everything starts with PWM mode
+	uint8_t control1Mode[9] = {0};  // Everything starts with PWM mode
+	uint16_t bendingTorqueLimit[9]= {0, 0, 0, 0, 0, 0, 0, 0, 0}; // default is limit zero!
+	bool doCalibrate = false;
+	bool inAuto= false; // default state is manual
+  
+  	// goal for the actionlib
+	PirateGoal goal;
+	// helper variables
+  	bool publish_control = 0;
+    bool publish_setpoint = 0;
+    bool publish_limit = 0;
+    bool publish_midi = 0;
+  	// message declarations
+	pirate_msgs::PirateControl_Array control_msg;	
+    pirate_msgs::PirateSetpoint_Array setpoint_msg;
+    pirate_msgs::PirateLimits_Array limit_msg;
+    ram_input_msgs::MidiOutput midiout;
+};
+
+
+Mapper::Mapper( ros::NodeHandle* nh): nh_(*nh), ac("pirate", true) // constructor
+{
+  ROS_INFO("Waiting for action server to start.");
+  ac.waitForServer();
+  ROS_INFO("Action server started.");
+  pub_control = nh_.advertise<pirate_msgs::PirateControl_Array>("/pirate/control_array", 1);
+  sub_midi = nh_.subscribe("/ram/input/midi", 1, &Mapper::callback, this);
+  pub_midi= nh_.advertise<ram_input_msgs::MidiOutput>("/ram/input/midiout", 1);
+  pub_setpoint=nh_.advertise<pirate_msgs::PirateSetpoint_Array>("/pirate/setpoint_array", 1);
+  pub_limit=nh_.advertise<pirate_msgs::PirateLimits_Array>("/pirate/limits_array", 1);
+}
+
+
+void Mapper::callback(const ram_input_msgs::Midi::ConstPtr& midi)
+{ 
+
+// Local variables to hold the channel and value for the midi
+  uint8_t number= midi->chan;
+  uint8_t value= midi->val;
+
+  switch (number) {
+	
+				case 0:  // Rear module(8) -> Writes to angleSetpoint[8]
+							if (control0Mode[8] == 0) 	{ // check this number, might not be correct
+								angleSetpoint[8] = 4*(63-value);//2s complement is +252 to -256// We store signed value into an unsigned byte. Needs cast to a signed value at the receivers end!
+								setpoint_msg.setpoint[8]= angleSetpoint[8];
+								publish_setpoint =1;
+							}
+				break;
+				case 1:  // Bend module(7) -> Writes to angleSetpoint[7] or torqueSetpoint[7]
+								if (control0Mode[7] == 0) { // Setpoint for PWM mode
+									angleSetpoint[7] = -4*(63-value); //2s complement is +256 to -252
+									setpoint_msg.setpoint[7]=angleSetpoint[7];  
+								} 
+								else if (control0Mode[7] == 3) { // Setpoint for torque mode
+									torqueSetpoint[7] = 4*(63-value); //torque is from +252 to -256
+									setpoint_msg.setpoint[7]=torqueSetpoint[7];  
+								}
+								publish_setpoint =1;
+			 break;
+			 case 2:  // Bend module(6) -> Writes to angleSetpoint[6] or torqueSetpoint[6]
+								if (control0Mode[6] == 0){  // Setpoint for PWM mode
+									angleSetpoint[6] = 4*(63-value); //2s complement is +252 to -256
+									setpoint_msg.setpoint[6]=angleSetpoint[6];  
+								}
+								else if (control0Mode[6] == 3) { // Setpoint for torque mode
+									torqueSetpoint[6]= -4*(63-value); //torque is from -252 to 256
+									setpoint_msg.setpoint[6]=torqueSetpoint[6]; 
+								}
+								publish_setpoint =1;
+			 break;
+			 case 3:  // Bend module(3) -> Writes to angleSetpoint[3] or torqueSetpoint[3]
+								if (control0Mode[3] == 0) {  // Setpoint for PWM mode
+									angleSetpoint[3]=4*(63-value); //2s complement is +252 to -256
+									setpoint_msg.setpoint[3]=angleSetpoint[3];  	
+								}
+								else if (control0Mode[3] == 3) { // Setpoint for torque mode
+									torqueSetpoint[3]= -4*(63-value); //torque is from -252 to 256
+									setpoint_msg.setpoint[3]=torqueSetpoint[3];  
+								}
+								publish_setpoint =1;
+			break;
+			case 4:  // Bend module(2) -> Writes to angleSetpoint[2] or torqueSetpoint[2]
+								if (control0Mode[2] == 0) { // Setpoint for PWM mode
+									angleSetpoint[2]= -4*(63-value); //2s complement is -252 to 256
+									setpoint_msg.setpoint[2]=angleSetpoint[2]; 
+								}
+								else if (control0Mode[2] == 3) { // Setpoint for torque mode
+									torqueSetpoint[2]=4*(63-value);  //torque is from +252 to -256
+									setpoint_msg.setpoint[2]=torqueSetpoint[2]; 
+								}
+								publish_setpoint =1;
+			break;
+			case 5:  // Front (Camera) module(21) -> This bend module doesn't have torque control only PWM! -> Writes to angleSetpoint[1]
+								angleSetpoint[1] = -4*(63-value);
+								setpoint_msg.setpoint[1]= angleSetpoint[1];  //2s complement is -252 to 256
+								publish_setpoint =1;
+			break;
+			case 6:  // Tilt Camera module (20) -> Writes to angleSetpoint[0]
+								if (control0Mode[0] == 0) { // Setpoint for Motor 0 in PWM Mode
+									angleSetpoint[0] = 4 * (63 - value); // 2s complement is -256 to 252
+								} 
+								else if (control0Mode[0] == 2) { // Setpoint for Motor 0 in Position Mode
+									angleSetpoint[0]= 7 * (63 - value); //2s complement is +441 to -448
+								}
+								setpoint_msg.setpoint[0]=angleSetpoint[0];  
+								publish_setpoint =1;
+			break;
+			case 7:  // Writes to speedSetpoint[2] to speedSetpoint[7] 
+			// THIS CASE IS FOR THE DRIVE WHEELS WHICH ARE CONTROLLED TOGETHER. WHEN WE SEND THIS MESSAGE TO THE ARDUINO IT WILL TRIGGER ALL THE OTHER MODULES 23-27 TO GO TO THE SAME SETTINGS, AS THEY ALL WORK TOGETHER, EITHER IN PWM OR VELOCITY MODE.
+							if (control1Mode[2] == 0) { // Motor 1 is used for the DRIVE wheels, so it has to be specified. In this case is PWM mode
+									speedSetpoint[2]=-4*(63-value);
+									speedSetpoint[3]=4*(63-value);
+									speedSetpoint[4]=-4*(63-value);
+									speedSetpoint[5]=4*(63-value);
+									speedSetpoint[6]=-4*(63-value);
+									speedSetpoint[7]=4*(63-value);
+							}     
+							if (control1Mode[2] == 2) { // Motor 1 is used for the DRIVE wheels, so it has to be specified. In this case is VELOCITY mode. Max velocity is 41
+									speedSetpoint[2]=1*(63-value);  //Max velocity is 41
+									speedSetpoint[3]=-1*(63-value);
+									speedSetpoint[4]=1*(63-value);
+									speedSetpoint[5]=-1*(63-value);
+									speedSetpoint[6]=1*(63-value);
+									speedSetpoint[7]=-1*(63-value);
+							}
+							setpoint_msg.setpoint[11]=speedSetpoint[2];
+							publish_setpoint =1;
+			break;
+		  // rotational potmeters (16 t/m 23): 
+			case 16:  //LED Rear -> Writes to speedSetpoint[8] only.
+							speedSetpoint[8]=-2*value; 		
+							setpoint_msg.setpoint[12]= speedSetpoint[8]; 
+							publish_setpoint =1;
+			break;
+			case 17:  //Torque control Limit for Module 7 Writes to bendingTorqueLimit[7] for motor 0 which is the bending motor
+							if (value == 127) { // No limit
+								bendingTorqueLimit[7]=0xFFFF; // we save this in the internal variable
+							} else {
+								bendingTorqueLimit[7]= 2 * value;
+							}
+							limit_msg.limit[3]=bendingTorqueLimit[7];
+							publish_limit = 1;
+			break;  
+			case 18:  //Torque control Limit for Module 6 Writes to bendingTorqueLimit[6] for motor 0 which is the bending motor
+							if (value == 127) { // No limit
+								bendingTorqueLimit[6]=0xFFFF; // we save this in the internal variable
+							} else {
+								bendingTorqueLimit[6]=2 * value;
+							}
+							limit_msg.limit[2]=bendingTorqueLimit[6];
+							publish_limit = 1;
+			break;  
+			case 19:  //Torque control Limit for Module 3 Writes to bendingTorqueLimit[3] for motor 0 which is the bending motor
+							if (value == 127) { // No limit
+								bendingTorqueLimit[3]=0xFFFF; // we save this in the internal variable
+							} else {
+								bendingTorqueLimit[3]=2 * value; // we save this in the internal variable
+							}	
+							limit_msg.limit[1]=bendingTorqueLimit[3];
+							publish_limit = 1;
+			break;  
+			case 20:  //Torque control Limit for Module 2 Writes to bendingTorqueLimit[2] for motor 0 which is the bending motor
+							if (value == 127) { // No limit
+								bendingTorqueLimit[2]=0xFFFF; // we save this in the internal variable
+							} else {
+								bendingTorqueLimit[2]=2 * value; // we save this in the internal variable
+							}
+							limit_msg.limit[0]=bendingTorqueLimit[2];
+							publish_limit = 1;
+			break;  
+			case 21:  // Pan Camera Module 20 Motor 1 -> Only writes to speedSetpoint[0] can be either PWM or Position
+							if (control1Mode[0] == 0) { // PWM Mode
+								speedSetpoint[0]=-4 * (63 - value);
+							} 
+							else if (control1Mode[0] == 2) { // Position Mode
+								speedSetpoint[0]=4 * (63 - value);
+							}
+							setpoint_msg.setpoint[9]=speedSetpoint[0];
+							publish_setpoint =1;
+			break;
+			case 22:  // LED Front Module 21 Motor 1 -> Writes to speedSetpoint[1] we put it as only velocity mode possible
+							speedSetpoint[1]=-2 * value;
+							setpoint_msg.setpoint[10]=speedSetpoint[1];
+							publish_setpoint =1;		
+			break;
+			case 23:  // Rotational Module 5 Motor 0 -> writes to angleSetpoint[5] can only be PWM
+							angleSetpoint[5]= 64 * (63 - value);  // 2s complement is +127 to -128, now -4096 to 4032
+							setpoint_msg.setpoint[5]= angleSetpoint[5]; 
+							publish_setpoint =1;
+			break;
+			case 41: // [PLAY] -> We send PLAY to module 28 just to set the Arduino to START -> Will write to [polling]
+							if ( value == 127 ) {
+								control_msg.controlMode[8]=7;// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								// turn PLAY led on STOP led off will be done in midi_output_mod.py program
+								midiout.button= number;
+								midiout.on= true;
+								publish_midi = 1;
+							}
+			break;
+			case 42: // [STOP] -> We send STOP to module 28 just to set the Arduino to STOP -> Will write to all speedSetpoints[2] to [8] and to polling
+							if ( value == 127 ) {
+								if (inAuto) { // if we are in Auto we additionally have to cancel the goal
+										ac.cancelGoal();
+								}
+							  control_msg.controlMode[8]=8;// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+							  publish_control = 1;
+								// turn STOP led on PLAY led off will be done in midi_output_mod.py program
+								midiout.button= number;
+								midiout.on= true;
+								publish_midi = 1;
+							}
+			break;
+			case 43: // [REWIND] -> Set the control to AUTO
+								if (value == 127) {
+										if (inAuto) {
+											inAuto=false;
+											midiout.button= number;
+											midiout.on= false;
+										}
+										else {
+										inAuto = true;
+										midiout.button= number;
+										midiout.on= true;
+										}
+								}
+							  publish_midi = 1;
+			break; 
+					
+			case 45: // [RECORD] -> NO LIMITS ALL TOGGLE: We send NO LIMITS ALL to module 28 just to set the Arduino to bypass all limits. Will write to noLimits[0-8] and noLimitsAll toggle between true and false
+							if(value==127){
+								if (doCalibrate) { // [SET] button needs to be held down to activate no limits
+									if(noLimitsAll){
+												noLimitsAll = false;
+												control_msg.controlMode[8]=9;// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+												publish_control = 1;
+												// turn off record button
+												midiout.button= number;
+												midiout.on= false;
+											}
+									else if(!noLimitsAll) {
+												noLimitsAll = true;
+												control_msg.controlMode[8]=9;// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+												publish_control = 1;
+												// turn on record button
+												midiout.button= number;
+												midiout.on= true;
+											}
+											publish_midi = 1;
+								}
+							}
+			break;
+		  case 46: // [CYCLE]
+							if ( value == 127 ) {
+							// When used with MIDI through ROS this one doesn't do anything as we don't have different formats nor do we display in serial the information of the modules
+										}
+			break;  
+							
+			// [S] buttons (32 t/m 39):
+			case 32: // Back module (28)
+							if (value==127){
+								//  control0Mode[8] = !controlModeRear;
+							}
+			break;
+			case 33: // Bend module (27) writes to control0Mode[7] in ARDUINO - Motor 0
+							if (value==127){
+								if (control0Mode[7] == 0) {
+									control0Mode[7] = 3; //Torque control
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[7] = 0; //PWM
+								// turn off button
+								midiout.button= number;
+								midiout.on= false;
+								}
+								control_msg.controlMode[7]=control0Mode[7];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								publish_midi = 1;
+							}
+			break;
+			case 34: // Bend module (26) writes to control0Mode[6] in Arduino - Motor 0
+							if (value==127){
+								if (control0Mode[6] == 0) {
+									control0Mode[6] = 3; //Torque control
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[6] = 0; //PWM
+									// turn off button
+									midiout.button= number;
+									midiout.on= false;
+								}
+								control_msg.controlMode[6]=control0Mode[6];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								publish_midi = 1;
+							}
+			break;
+			case 35: // Bend module (23) writes to control0Mode[3] in Arduino - Motor 0
+							if (value==127){
+								if (control0Mode[3] == 0) {
+									control0Mode[3] = 3; //Torque control
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[3] = 0; //PWM
+									// turn off button
+									midiout.button= number;
+									midiout.on= false;
+								}
+								control_msg.controlMode[3]=control0Mode[3];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								publish_midi = 1;
+							}
+			break;
+			case 36: // Bend module (22) writes to control0Mode[2] in Arduino - Motor 0
+							if (value==127){
+								if (control0Mode[2] == 0) {
+									control0Mode[2] = 3; //Torque control
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[2] = 0; //PWM
+									// turn on button
+									midiout.button= number;
+									midiout.on= false;
+								}
+								control_msg.controlMode[2]=control0Mode[2];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								publish_midi = 1;
+							}
+		break;
+	  case 37: // Front module (21) writes to control0Mode[1] in Arduino - Motor 0
+							if (value==127){
+								if (control0Mode[1] == 0) {
+									control0Mode[1] = 2; //Position control
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[1] = 0; //PWM
+									// turn off button
+									midiout.button= number;
+									midiout.on= false;
+								}
+								control_msg.controlMode[1]=control0Mode[1];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+								publish_control = 1;
+								publish_midi = 1;
+							}
+			break;
+			case 38: // Camera module (20) writes to control0Mode[0] and control1Mode[0] in Arduino - Motors 0 and 1
+							if (value==127){
+								if ((control0Mode[0] == 0) | (control1Mode[0] == 0)) {
+									control0Mode[0] = 2; //Pos control Motor 0 - Tilt camera
+									control1Mode[0] = 2; //Pos control Motor 1 - Pan camera
+									// turn on button
+									midiout.button= number;
+									midiout.on= true;
+								} else {
+									control0Mode[0] = 0; //PWM Motor 0 - Tilt camera
+									control1Mode[0] = 0; //PWM Motor 1 - Pan camera
+									// turn off button
+									midiout.button= number;
+									midiout.on= false;
+								}
+									control_msg.controlMode[0]=control0Mode[0];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+									control_msg.controlMode[9]=control1Mode[0];// PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9
+									publish_control = 1;
+									publish_midi = 1;
+							}
+			break;
+			case 39: // Wheels
+							if (value==127){
+									if (control1Mode[2] == 0) {
+										for (uint8_t i = 2; i < 8; i++) { 
+											control1Mode[i] = 1; // Speed control
+										} 
+										// turn on button
+										midiout.button= number;
+										midiout.on= true;
+									} else {
+										for (uint8_t i = 2; i < 8; i++) { 
+											control1Mode[i] = 0; // PWM
+										} 
+										// turn off button
+										midiout.button= number;
+										midiout.on= false;		
+									}
+								}
+								control_msg.controlMode[11]= control1Mode[2];
+								publish_control = 1;
+								publish_midi = 1;
+			break;
+			// Stop [M] buttons (48 t/m 55): 
+			case 49:  // ID 27 Writes to angleSetpoint[7]=0 in ARDUINO -> Single Stop -> Motor 0
+							if (value==127) {
+								control_msg.controlMode[7]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 50:  // ID 26 Writes to angleSetpoint[6]=0 in ARDUINO -> Single Stop  -> Motor 0
+							if (value==127) {         
+								control_msg.controlMode[6]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 51:  // ID 23 Writes to angleSetpoint[3]=0 in ARDUINO -> Single Stop  -> Motor 0
+							if (value==127){
+								control_msg.controlMode[3]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 52:  // ID 22 Writes to angleSetpoint[2]=0 in ARDUINO -> Single Stop  -> Motor 0
+							if (value==127){
+								control_msg.controlMode[2]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 53:  // ID 21 Writes to angleSetpoint[1]=0 in ARDUINO -> Single Stop  -> Motor 0
+							if (value==127){        
+								control_msg.controlMode[1]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 54: // ID 20 Writes to angleSetpoint[0] y speedSetpoint[0] in ARDUINO -> Single Stop for both motor 1 and 0
+							if (value==127){        
+								control_msg.controlMode[0]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+								publish_control = 1;
+							}
+			break;
+			case 55: // Soft stop all the drive wheels -> This will be copied in arduino to all of them
+							if(value==127){
+									control_msg.controlMode[11]=10;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+							}
+							publish_control = 1;
+			break;
+			case 58: // [TRACK left]
+							if (value==127)	 {
+								if(inAuto) {
+									// Specify Goal in this case clamp up in 90 degrees (vertical)
+									goal.name='c';
+									goal.parameter1='u';
+									goal.parameter2='v';
+									// Send goal
+									ac.sendGoal(goal, boost::bind(&Mapper::doneCb, this, _1, _2), Client::SimpleActiveCallback(), Client::SimpleFeedbackCallback());
+								}
+								else {
+								ROS_INFO("Robot must be in AUTO mode to complete automatic clamp up in 110mm");
+								}
+							}
+			break;
+			case 59: // [TRACK right]
+							if (value==127)	 {
+								if(inAuto) {
+									// Specify Goal in this case clamp up in 90 degrees (vertical)
+									goal.name='t';
+									goal.parameter1='r';
+									goal.parameter2='x';
+									// Send goal
+									ac.sendGoal(goal, boost::bind(&Mapper::doneCb, this, _1, _2), Client::SimpleActiveCallback(), Client::SimpleFeedbackCallback());
+								}
+								else {
+								ROS_INFO("Robot must be in AUTO mode to complete automatic clamp up in 90mm");
+								}
+							}
+			break;
+			case 60:  // Hold [SET] button to enter calibration mode
+						if(value == 127) { // only when held down
+								doCalibrate = true;
+								// turn on button
+								midiout.button= number;
+								midiout.on= true;
+						} else {
+								doCalibrate = false;
+								// turn off button
+								midiout.button= number;
+								midiout.on= false;
+								}
+						publish_midi = 1;
+			break;							
+			// [R] buttons (64 t/m 71):
+			case 64:  // hold [SET] button to enter calibration mode and calibrate the individual modules with the [R] button next to the respective slider
+							if ( value == 127 ) { // Module 8
+								if (doCalibrate) {
+									control_msg.controlMode[8]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+			case 65: // Module 7
+							if ( value == 127 ) {
+								if (doCalibrate) {
+									control_msg.controlMode[7]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+		  case 66: // MOdule 6
+							if ( value == 127 ) {
+								if (doCalibrate) {
+									control_msg.controlMode[6]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+			case 67: // Module 3
+							if ( value == 127 ) {
+								if (doCalibrate) {
+									control_msg.controlMode[3]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+			case 68: // Module 2
+							if ( value == 127 ) { 
+								if (doCalibrate) {
+									control_msg.controlMode[2]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+			case 69: // Module 1
+							if ( value == 127 ) {
+								if (doCalibrate) {
+									control_msg.controlMode[1]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+								}
+							}
+			break;
+			case 70:
+							if ( value == 127 ) {
+								if (doCalibrate) {
+									control_msg.controlMode[0]=5;//  PWM=0, Vel=1, Pos=2, Torque=3, Curr=4, CALIB= 5, TorqueLimit=6, PLAY=7, STOP=8, noLimitsAll=9 SingleStop=10
+									publish_control = 1;
+        		  }
+        		}
+      break; 
+      default:
+        // We never com here, but in order to stop the compiler from complaining:
+      break;
+      
+	}
+	
+	if (publish_control == 1) {
+  	pub_control.publish(control_msg); 
+		publish_control = 0; // reset flag
+	}
+	
+}
+
+void Mapper::publisher(void) {
+			// publish setpoints and limits
+			if (publish_setpoint == 1) {
+			    pub_setpoint.publish(setpoint_msg);
+			    publish_setpoint = 0; // reset flag
+			}
+			
+			if (publish_limit == 1) {
+				pub_limit.publish(limit_msg);
+				publish_limit = 0; // reset flag
+			}
+
+			if (publish_midi == 1) {
+				pub_midi.publish(midiout);
+				publish_midi = 0; // reset flag
+			}
+}
+
+
+
+
+int main(int argc, char **argv)
+{
+  ros::init(argc, argv, "mapper");
+ 
+  ros::NodeHandle nh("pirate_action_server");
+  ros::Rate loop_rate(10); // check if there is any information to publish every 10Hz
+  Mapper mapper_midi(&nh);
+
+  while (ros::ok()){
+        mapper_midi.publisher();
+        ros::spinOnce();
+     	loop_rate.sleep();
+	}
+
+  ros::spin();
+  return 0;
+}
+
+
